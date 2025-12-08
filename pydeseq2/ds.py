@@ -14,7 +14,7 @@ from pydeseq2.default_inference import DefaultInference
 from pydeseq2.inference import Inference
 from pydeseq2.utils import lowess
 from pydeseq2.utils import make_MA_plot
-
+from pydeseq2.utils import lrt_test
 
 class DeseqStats:
     """PyDESeq2 statistical tests for differential expression.
@@ -137,6 +137,7 @@ class DeseqStats:
         independent_filter: bool = True,
         prior_LFC_var: np.ndarray | None = None,
         lfc_null: float = 0.0,
+        test: Literal['Wald', 'LRT'] = 'Wald',
         alt_hypothesis: (
             Literal["greaterAbs", "lessAbs", "greater", "less"] | None
         ) = None,
@@ -163,7 +164,7 @@ class DeseqStats:
             )
         self.lfc_null = lfc_null
         self.alt_hypothesis = alt_hypothesis
-
+        self.test = test
         # Initialize the design matrix and LFCs. If the chosen reference level are the
         # same as in dds, keep them unchanged. Otherwise, change reference level.
         self.design_matrix = self.dds.obsm["design_matrix"].copy()
@@ -172,6 +173,8 @@ class DeseqStats:
         # Check the validity of the contrast (if provided) or build it.
         self.contrast: list[str] | np.ndarray
         if contrast is None:
+            if self.test != 'LRT':
+                self.test = 'LRT'
             raise ValueError(
                 """Default contrasts are no longer supported.
                 The "contrast" argument must be provided."""
@@ -214,6 +217,10 @@ class DeseqStats:
                 "refitted. Please run 'dds.refit()' first or set 'dds.refit_cooks' "
                 "to False."
             )
+
+        self.p_values: pd.Series
+        self.statistics: pd.Series
+        self.SE: pd.Series
 
     @property
     def variables(self):
@@ -261,7 +268,10 @@ class DeseqStats:
             self.lfc_null = lfc_null
             self.alt_hypothesis = alt_hypothesis
             rerun_summary = True
-            self.run_wald_test()
+            if str(self.test).lower == 'wald':
+                self.run_wald_test()
+            elif str(self.test).lower == 'lrt':
+                self.run_lrt_test()
 
         if self.cooks_filter:
             # Filter p-values based on Cooks outliers
@@ -280,7 +290,8 @@ class DeseqStats:
         self.results_df = pd.DataFrame(index=self.dds.var_names)
         self.results_df["baseMean"] = self.base_mean
         self.results_df["log2FoldChange"] = self.LFC @ self.contrast_vector / np.log(2)
-        self.results_df["lfcSE"] = self.SE / np.log(2)
+        if str(self.test).lower() == 'wald':
+            self.results_df["lfcSE"] = self.SE / np.log(2)
         self.results_df["stat"] = self.statistics
         self.results_df["pvalue"] = self.p_values
         self.results_df["padj"] = self.padj
@@ -289,13 +300,13 @@ class DeseqStats:
             if isinstance(self.contrast, np.ndarray):
                 # The contrast vector was directly provided
                 print(
-                    f"Log2 fold change & Wald test p-value, contrast vector: "
+                    f"Log2 fold change & {self.test} test p-value, contrast vector: "
                     f"{self.contrast}"
                 )
             else:
                 # The factor is categorical
                 print(
-                    f"Log2 fold change & Wald test p-value: "
+                    f"Log2 fold change & {self.test} test p-value: "
                     f"{self.contrast[0]} {self.contrast[1]} vs {self.contrast[2]}"
                 )
             print(self.results_df)
@@ -359,6 +370,47 @@ class DeseqStats:
             self.statistics.loc[self.dds.new_all_zeroes_genes] = 0.0
             self.p_values.loc[self.dds.new_all_zeroes_genes] = 1.0
 
+    def run_lrt_test(self) -> None:
+        """Perform the likelihood ratio test
+        
+        Get gene-wise p-values for gene over/under expression
+        """
+        num_vars = self.design_matrix.shape[1]
+        
+        if self.prior_LFC_var is not None:
+            ridge_factor = np.diag(1 / self.prior_LFC_var ** 2)
+        else:
+            ridge_factor = np.diag(np.repeat(1e-6, num_vars))
+            
+        design_matrix = self.design_matrix.values
+        LFCs = self.LFC.values
+        
+        if not self.quiet:
+            print("Running LLR tests...", file = sys.stderr)
+            
+        start = time.time()
+        pvals, stats = self.inference.lrt_test(
+            counts = self.dds.X,
+            design_matrix = design_matrix,
+            size_factors = self.dds.obsm['size_factors'],
+            disp = self.dds.varm['dispersions'],
+            lfc = LFCs,
+            min_mu = self.dds.min_mu,
+            ridge_factor = ridge_factor,
+            beta_tol = self.dds.beta_tol,
+        )
+        
+        end = time.time()
+        if not self.quiet:
+            print(f"... done in {end - start:.2f} seconds.\n", file=sys.stderr)
+
+        self.p_values = pd.Series(pvals, index = self.dds.var_names)
+        self.statistics = pd.Series(stats, index = self.dds.var_names)
+        
+        if self.dds.refit_cooks and self.dds.varm['replaced'].sum() > 0:
+            self.statistics.loc[self.dds.new_all_zeroes_genes] = 0.0
+            self.p_values.loc[self.dds.new_all_zeroes_genes] = 1.0
+    
     # TODO update this to reflect the new contrast format
     def lfc_shrink(self, coeff: str, adapt: bool = True) -> None:
         """LFC shrinkage with an apeGLM prior :cite:p:`DeseqStats-zhu2019heavy`.
@@ -418,17 +470,18 @@ class DeseqStats:
             )
         )
 
-        self.SE.update(
-            pd.Series(
-                np.array(
-                    [
-                        np.sqrt(np.abs(inv_hess[coeff_idx, coeff_idx]))
-                        for inv_hess in inv_hessians
-                    ]
-                ),
-                index=self.dds.non_zero_genes,
+        if str(self.test).lower() == 'wald':
+            self.SE.update(
+                pd.Series(
+                    np.array(
+                        [
+                            np.sqrt(np.abs(inv_hess[coeff_idx, coeff_idx]))
+                            for inv_hess in inv_hessians
+                        ]
+                    ),
+                    index=self.dds.non_zero_genes,
+                )
             )
-        )
 
         self._LFC_shrink_converged = pd.Series(np.nan, index=self.dds.var_names)
         self._LFC_shrink_converged.update(
@@ -441,7 +494,8 @@ class DeseqStats:
         # Replace in results dataframe, if it exists
         if hasattr(self, "results_df"):
             self.results_df["log2FoldChange"] = self.LFC.iloc[:, coeff_idx] / np.log(2)
-            self.results_df["lfcSE"] = self.SE / np.log(2)
+            if str(self.test).lower() == 'wald':
+                self.results_df["lfcSE"] = self.SE / np.log(2)
             if not self.quiet:
                 print(f"Shrunk log2 fold change & Wald test p-value: {coeff}")
                 print(self.results_df)

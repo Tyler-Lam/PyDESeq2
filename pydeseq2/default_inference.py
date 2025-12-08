@@ -197,6 +197,49 @@ class DefaultInference(inference.Inference):
 
         return pvals, stats, se
 
+    def lrt_test(
+        self,
+        counts: np.ndarray,
+        design_matrix: np.ndarray,
+        size_factors: np.ndarray,
+        disp: float,
+        lfc: np.ndarray,
+        min_mu: float,
+        ridge_factor: np.ndarray,
+        beta_tol: float,
+    ):
+        num_genes = lfc.shape[0]
+        
+        # Assume reduced model is always constant
+        reduced_design_matrix = np.ones(shape = (design_matrix.shape[0], 1))
+        reduced_ridge_factor = np.array([[1e-6]])
+        
+        with parallel_backend(self._backend, inner_max_num_threads = 1):
+            res = Parallel(
+                n_jobs = self.n_cpus,
+                verbose = self._joblib_verbosity,
+                batch_size = self._batch_size,
+            )(
+                delayed(utils.ltr_test)(
+                    counts = counts,
+                    design_matrix = design_matrix,
+                    reduced_design_matrix = reduced_design_matrix,
+                    size_factors = size_factors,
+                    disp = disp,
+                    lfc = lfc,
+                    min_mu = min_mu,
+                    ridge_factor = ridge_factor,
+                    reduced_ridge_factor = reduced_ridge_factor,
+                    beta_tol = beta_tol,
+                )
+                for i in range(num_genes)
+            )
+        
+        res = zip(*res, strict = False)
+        pvals, stats = (np.array(m) for m in res)
+        return pvals, stats
+        
+
     def dispersion_trend_gamma_glm(  # noqa: D102
         self, covariates: pd.Series, targets: pd.Series
     ) -> tuple[np.ndarray, np.ndarray, bool]:
