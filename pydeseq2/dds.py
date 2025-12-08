@@ -315,7 +315,7 @@ class DeseqDataSet(ad.AnnData):
         self.beta_tol = beta_tol
         self.quiet = quiet
         self.low_memory = low_memory
-        self.size_factors_fit_type = size_factors_fit_type
+        self.size_factors_fit_type = size_factors_fit_type if not (self.X == 0).any(0).all() else 'poscounts'
         self.control_genes = control_genes
         self.logmeans: np.ndarray | None = None
         self.filtered_genes: np.ndarray | None = None
@@ -534,23 +534,11 @@ class DeseqDataSet(ad.AnnData):
             self.fit_type = fit_type
             if not self.quiet:
                 print(f"Using {self.fit_type} fit type.")
-    with warnings.catch_warnings(record=True) as ws:
-        warnings.simplefilter("always")  # Catch all warnings
 
         # Compute DESeq2 normalization factors using the Median-of-ratios method
         self.fit_size_factors(
             fit_type=self.size_factors_fit_type, control_genes=self.control_genes
         )
-        
-        # A lot of our counts are sparse. If every gene has a zero count row, the ratio size fitting method fails
-        # deseq2 tries to use the 'iterative' method, but this usually fails so instead we use the 'poscounts' method
-        for w in ws:
-            if ( issubclass(w.category, UserWarning) and "Every gene contains at least one zero" in str(w.message)):
-                print ("Cannot use ratio size factor fitting. Trying poscounts")
-                
-                self.fit_size_factors(
-                    fit_type = 'poscounts', control_genes = self.control_genes
-                )
 
         # Fit an independent negative binomial model per gene
         self.fit_genewise_dispersions()
