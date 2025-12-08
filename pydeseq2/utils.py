@@ -1297,9 +1297,7 @@ def make_scatter(
     plt.tight_layout()
     if save_path is not None:
         plt.savefig(save_path, bbox_inches="tight")
-        plt.close()
-    else:
-        plt.show()
+    plt.show()
 
 
 def make_MA_plot(
