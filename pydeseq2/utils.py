@@ -496,13 +496,14 @@ def fit_alpha_mle(
     bool
         Whether L-BFGS-B converged. If not, dispersion is estimated using grid search.
     """
+        
     assert optimizer in ["BFGS", "L-BFGS-B"]
 
     if prior_reg:
         # Note: assertion is not working when using numpy
-        assert prior_disp_var is not None, (
-            "Sigma_prior is required for prior regularization"
-        )
+        assert (
+            prior_disp_var is not None
+        ), "Sigma_prior is required for prior regularization"
 
     log_alpha_hat = np.log(alpha_hat)
 
@@ -518,7 +519,7 @@ def fit_alpha_mle(
                 raise ValueError("Sigma_prior is required for prior regularization")
             reg += (log_alpha - log_alpha_hat) ** 2 / (2 * prior_disp_var)
         return cast(float, nb_nll(counts, mu, alpha)) + reg
-
+    
     def dloss(log_alpha: float) -> float:
         # gradient closure
         alpha = np.exp(log_alpha)
@@ -541,27 +542,29 @@ def fit_alpha_mle(
             reg_grad += (log_alpha - log_alpha_hat) / prior_disp_var
         # dnb_nll is the gradient wrt alpha, we need to multiply by alpha to get the
         # gradient wrt log_alpha
-        return alpha * dnb_nll(counts, mu, alpha) + reg_grad
-
+        return alpha * pydeseq2.utils.dnb_nll(counts, mu, alpha) + reg_grad
+    
     res = minimize(
         lambda x: loss(x[0]),
-        x0=np.asarray([np.log(alpha_hat)]),
-        jac=lambda x: np.asarray([dloss(x[0])]),
+        x0=np.log(alpha_hat),
+        jac=lambda x: dloss(x[0]),
         method=optimizer,
         bounds=(
             [(np.log(min_disp), np.log(max_disp))] if optimizer == "L-BFGS-B" else None
         ),
     )
-
-    if res.success:
-        return np.exp(res.x[0]), res.success
-    else:
-        return (
-            np.exp(
-                grid_fit_alpha(counts, design_matrix, mu, alpha_hat, min_disp, max_disp)
-            ),
-            res.success,
+    
+    # Quick patch to run grid search if minimizer fails
+    # Known issue with dispersion fitting that returns min_disp without indicating the fit failed
+    # https://github.com/owkin/PyDESeq2/issues/391
+    if not res.success or res.x[0] == np.log(min_disp):
+        return  (np.exp(
+                    grid_fit_alpha(counts, design_matrix, mu, alpha_hat, min_disp, max_disp)
+                ),
+                False,
         )
+    else:
+        return np.exp(res.x[0]), res.success
 
 
 def trimmed_mean(x: np.ndarray, trim: float = 0.1, **kwargs) -> float | np.ndarray:
