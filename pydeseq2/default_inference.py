@@ -207,12 +207,16 @@ class DefaultInference(inference.Inference):
         min_mu: float,
         ridge_factor: np.ndarray,
         beta_tol: float,
+        reduced_design_matrix: (np.ndarray | None) = None,
+        reduced_ridge_factor: (np.ndarray | None) = None,
     ):
         num_genes = lfc.shape[0]
         
-        # Assume reduced model is always constant
-        reduced_design_matrix = np.ones(shape = (design_matrix.shape[0], 1))
-        reduced_ridge_factor = np.array([[1e-6]])
+        # Assume reduced model is always constant if none given
+        if reduced_design_matrix is None:
+            reduced_design_matrix = np.ones(shape = (design_matrix.shape[0], 1))
+        if reduced_ridge_factor is None:
+            reduced_ridge_factor = np.array([[1e-6]])
         
         with parallel_backend(self._backend, inner_max_num_threads = 1):
             res = Parallel(
@@ -220,13 +224,13 @@ class DefaultInference(inference.Inference):
                 verbose = self._joblib_verbosity,
                 batch_size = self._batch_size,
             )(
-                delayed(utils.ltr_test)(
-                    counts = counts,
+                delayed(utils.lrt_test)(
+                    counts = counts[:,i],
                     design_matrix = design_matrix,
                     reduced_design_matrix = reduced_design_matrix,
                     size_factors = size_factors,
-                    disp = disp,
-                    lfc = lfc,
+                    disp = disp[i],
+                    lfc = lfc[i],
                     min_mu = min_mu,
                     ridge_factor = ridge_factor,
                     reduced_ridge_factor = reduced_ridge_factor,

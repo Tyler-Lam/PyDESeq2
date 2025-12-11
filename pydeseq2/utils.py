@@ -886,9 +886,6 @@ def lrt_test(
     lrt_statistic = 2 * (full_ll - reduced_ll)
     lrt_p_value = chi2.sf(lrt_statistic, df=design_matrix.shape[1] - reduced_design_matrix.shape[1])
 
-    print(lrt_p_value)
-    print(lrt_statistic)
-
     return lrt_p_value, lrt_statistic
     
 def fit_rough_dispersions(

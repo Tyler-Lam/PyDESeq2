@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import root_scalar  # type: ignore
 from scipy.stats import false_discovery_control  # type: ignore
+from formulaic_contrasts import FormulaicContrasts  # type: ignore[import-untyped]
 
 from pydeseq2.dds import DeseqDataSet
 from pydeseq2.default_inference import DefaultInference
@@ -29,7 +30,7 @@ class DeseqStats:
     dds : DeseqDataSet
         DeseqDataSet for which dispersion and LFCs were already estimated.
 
-    contrast : list or ndarray
+    contrast : list or ndarray or dict
         Either a list of three strings or a numpy array.
         If a list of three strings, it must be in the following format:
         ``['variable_of_interest', 'tested_level', 'ref_level']``.
@@ -38,6 +39,9 @@ class DeseqStats:
         to 'condition A'.
         If a numpy array, it must be a contrast vector of the same length as the design
         matrix.
+        If it is a dictionary, it must have the keys 'test' and 'ref', whose values
+        are dictionaries defining the reference and test classes respectively.
+        E.g., ``{'test': dict(condition = 'B'), 'ref': dict(condition = 'A')}``
 
     alpha : float
         P-value and adjusted p-value significance threshold (usually 0.05).
@@ -55,6 +59,18 @@ class DeseqStats:
 
     lfc_null : float
         The (log2) log fold change under the null hypothesis. (default: ``0``).
+
+    test : str
+        Test method for computing p-values. Uses either the wald test or log likelihood ratio test
+        One of ``["Wald", "LRT"]``. 
+        If using the likelihood ratio test, the contrast doesn't matter and the log fold changes/intercept
+        in the results DF should be ignored. The only important quantities are the test statistic and p-values. 
+        The LRT method has reduced functionality to the Wald test method. It cannot use methods relying on LFC (e.g. lfc_shrinkage)
+        or accommodate prior_LFC_var to the ridge regularization 
+    
+    design_null : str / None, optional
+        Formulaic formula for null hypothesis design matrix. Only used with the likelihood ratio test to calculate reduced model LLR
+        Formula must be strictly nested from the original design matrix.
 
     alt_hypothesis : str, optional
         The alternative hypothesis for computing wald p-values. By default, the normal
@@ -79,7 +95,7 @@ class DeseqStats:
 
     lfc_null : float
         The (log2) log fold change under the null hypothesis.
-
+        
     alt_hypothesis : str, optional
         The alternative hypothesis for computing wald p-values.
 
@@ -131,13 +147,14 @@ class DeseqStats:
     def __init__(
         self,
         dds: DeseqDataSet,
-        contrast: list[str] | np.ndarray,
+        contrast: list[str] | np.ndarray | None = None,
         alpha: float = 0.05,
         cooks_filter: bool = True,
         independent_filter: bool = True,
         prior_LFC_var: np.ndarray | None = None,
         lfc_null: float = 0.0,
         test: Literal['Wald', 'LRT'] = 'Wald',
+        design_null: str | None = None,
         alt_hypothesis: (
             Literal["greaterAbs", "lessAbs", "greater", "less"] | None
         ) = None,
@@ -165,20 +182,23 @@ class DeseqStats:
         self.lfc_null = lfc_null
         self.alt_hypothesis = alt_hypothesis
         self.test = test
+        self.design_null = design_null
         # Initialize the design matrix and LFCs. If the chosen reference level are the
         # same as in dds, keep them unchanged. Otherwise, change reference level.
         self.design_matrix = self.dds.obsm["design_matrix"].copy()
         self.LFC = self.dds.varm["LFC"].copy()
 
         # Check the validity of the contrast (if provided) or build it.
-        self.contrast: list[str] | np.ndarray
+        self.contrast: list[str] | np.ndarray | dict | None
         if contrast is None:
             if self.test != 'LRT':
                 self.test = 'LRT'
-            raise ValueError(
-                """Default contrasts are no longer supported.
-                The "contrast" argument must be provided."""
-            )
+                warnings.warn(
+                    "No default contrast provided, "
+                    "defaulting to likelihood ratio test (lrt)", 
+                    UserWarning, 
+                    stack_level = 2
+                )
         elif isinstance(contrast, np.ndarray):
             if contrast.shape[0] != self.dds.obsm["design_matrix"].shape[1]:
                 raise ValueError(
@@ -288,27 +308,15 @@ class DeseqStats:
 
         # Store the results in a DataFrame, in log2 scale for LFCs.
         self.results_df = pd.DataFrame(index=self.dds.var_names)
-        self.results_df["baseMean"] = self.base_mean
-        self.results_df["log2FoldChange"] = self.LFC @ self.contrast_vector / np.log(2)
         if str(self.test).lower() == 'wald':
+            self.results_df["baseMean"] = self.base_mean
+            self.results_df["log2FoldChange"] = self.LFC @ self.contrast_vector / np.log(2)
             self.results_df["lfcSE"] = self.SE / np.log(2)
         self.results_df["stat"] = self.statistics
         self.results_df["pvalue"] = self.p_values
         self.results_df["padj"] = self.padj
 
         if not self.quiet:
-            if isinstance(self.contrast, np.ndarray):
-                # The contrast vector was directly provided
-                print(
-                    f"Log2 fold change & {self.test} test p-value, contrast vector: "
-                    f"{self.contrast}"
-                )
-            else:
-                # The factor is categorical
-                print(
-                    f"Log2 fold change & {self.test} test p-value: "
-                    f"{self.contrast[0]} {self.contrast[1]} vs {self.contrast[2]}"
-                )
             print(self.results_df)
 
     def run_wald_test(self) -> None:
@@ -384,6 +392,9 @@ class DeseqStats:
             
         design_matrix = self.design_matrix.values
         LFCs = self.LFC.values
+        size_factors = self.dds.obs['size_factors'].values
+        reduced_design_matrix = FormulaicContrasts(self.dds.obs, self.design_null if self.design_null is not None else "~1").design_matrix.values
+        reduced_ridge_factor = np.diag(np.repeat(1e-6, reduced_design_matrix.shape[1]))
         
         if not self.quiet:
             print("Running LLR tests...", file = sys.stderr)
@@ -392,12 +403,14 @@ class DeseqStats:
         pvals, stats = self.inference.lrt_test(
             counts = self.dds.X,
             design_matrix = design_matrix,
-            size_factors = self.dds.obsm['size_factors'],
-            disp = self.dds.varm['dispersions'],
+            size_factors = size_factors,
+            disp = self.dds.var['dispersions'].values,
             lfc = LFCs,
             min_mu = self.dds.min_mu,
             ridge_factor = ridge_factor,
             beta_tol = self.dds.beta_tol,
+            reduced_design_matrix = reduced_design_matrix,
+            reduced_ridge_factor = reduced_ridge_factor,
         )
         
         end = time.time()
@@ -407,7 +420,7 @@ class DeseqStats:
         self.p_values = pd.Series(pvals, index = self.dds.var_names)
         self.statistics = pd.Series(stats, index = self.dds.var_names)
         
-        if self.dds.refit_cooks and self.dds.varm['replaced'].sum() > 0:
+        if self.dds.refit_cooks and self.dds.var["replaced"].sum() > 0:
             self.statistics.loc[self.dds.new_all_zeroes_genes] = 0.0
             self.p_values.loc[self.dds.new_all_zeroes_genes] = 1.0
     
@@ -431,6 +444,10 @@ class DeseqStats:
             raise KeyError(
                 f"The coeff argument '{coeff}' should be one the LFC columns. "
                 f"The available LFC coeffs are {self.LFC.columns[1:]}."
+            )
+        if str.lower(self.test) != 'wald':
+            raise KeyError(
+                "LFC shrinkage only available with the Wald test"
             )
 
         coeff_idx = self.LFC.columns.get_loc(coeff)
@@ -463,14 +480,14 @@ class DeseqStats:
         if not self.quiet:
             print(f"... done in {end - start:.2f} seconds.\n", file=sys.stderr)
 
-        self.LFC.iloc[:, coeff_idx].update(
-            pd.Series(
-                np.array(lfcs)[:, coeff_idx],
-                index=self.dds.non_zero_genes,
-            )
-        )
-
         if str(self.test).lower() == 'wald':
+            self.LFC.iloc[:, coeff_idx].update(
+                pd.Series(
+                    np.array(lfcs)[:, coeff_idx],
+                    index=self.dds.non_zero_genes,
+                )
+            )
+
             self.SE.update(
                 pd.Series(
                     np.array(
@@ -494,8 +511,7 @@ class DeseqStats:
         # Replace in results dataframe, if it exists
         if hasattr(self, "results_df"):
             self.results_df["log2FoldChange"] = self.LFC.iloc[:, coeff_idx] / np.log(2)
-            if str(self.test).lower() == 'wald':
-                self.results_df["lfcSE"] = self.SE / np.log(2)
+            self.results_df["lfcSE"] = self.SE / np.log(2)
             if not self.quiet:
                 print(f"Shrunk log2 fold change & Wald test p-value: {coeff}")
                 print(self.results_df)
@@ -544,7 +560,10 @@ class DeseqStats:
         """
         # Check that p-values are available. If not, compute them.
         if not hasattr(self, "p_values"):
-            self.run_wald_test()
+            if str(self.test).lower() == 'wald':
+                self.run_wald_test()
+            elif str(self.test).lower() == 'lrt':
+                self.run_lrt_test()
 
         lower_quantile = np.mean(self.base_mean == 0)
 
@@ -588,8 +607,11 @@ class DeseqStats:
         """
         if not hasattr(self, "p_values"):
             # Estimate p-values with Wald test
-            self.run_wald_test()
-
+            if str(self.test).lower() == 'wald':
+                self.run_wald_test()
+            elif str(self.test).lower() == 'lrt':
+                self.run_lrt_test()
+                
         self.padj = pd.Series(np.nan, index=self.dds.var_names)
         self.padj.loc[~self.p_values.isna()] = false_discovery_control(
             self.p_values.dropna(), method="bh"
@@ -599,8 +621,11 @@ class DeseqStats:
         """Filter p-values based on Cooks outliers."""
         # Check that p-values are available. If not, compute them.
         if not hasattr(self, "p_values"):
-            self.run_wald_test()
-
+            if str(self.test).lower() == 'wald':
+                self.run_wald_test()
+            elif str(self.test).lower() == 'lrt':
+                self.run_lrt_test()
+                
         self.p_values[self.dds.cooks_outlier()] = np.nan
 
     def _fit_prior_var(
@@ -647,9 +672,18 @@ class DeseqStats:
 
         Allows to test any pair of levels without refitting LFCs.
         """
-        factor = self.contrast[0]
-        alternative = self.contrast[1]
-        ref = self.contrast[2]
-        self.contrast_vector = self.dds.contrast(
-            column=factor, baseline=ref, group_to_compare=alternative
-        )
+        if isinstance(self.contrast, list):
+            factor = self.contrast[0]
+            alternative = self.contrast[1]
+            ref = self.contrast[2]
+            self.contrast_vector = self.dds.contrast(
+                column=factor, baseline=ref, group_to_compare=alternative
+            )
+        elif isinstance(self.contrast, dict):
+            ref = self.contrast['ref']
+            test = self.contrast['test']
+            
+            c_ref = self.dds.cond(**ref)
+            c_test = self.dds.cond(**test)
+            
+            self.contrast_vector = (c_test - c_ref).values
