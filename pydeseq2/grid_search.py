@@ -188,36 +188,35 @@ def grid_fit_beta(
     ndarray
         Fitted LFC parameter.
     """
-    x_grid = np.linspace(min_beta, max_beta, grid_length)
-    y_grid = np.linspace(min_beta, max_beta, grid_length)
-    ll_grid = np.zeros((grid_length, grid_length))
+    n_params = design_matrix.shape[1]
+    grid = [np.linspace(min_beta, max_beta, grid_length) for _ in range(n_params)]
+    shape = [grid_length for n in range(n_params)]
+    ll_grid = np.zeros(shape)
 
     def loss(beta: np.ndarray) -> np.ndarray:
         # closure to minimize
         mu = np.maximum(size_factors[:, None] * np.exp(design_matrix @ beta.T), min_mu)
-        return vec_nb_nll(counts, mu, disp) + 0.5 * (1e-6 * beta**2).sum(1)
+        return pydeseq2.grid_search.vec_nb_nll(counts, mu, disp) + 0.5 * (1e-6 * beta**2).sum(1)
+    
+    params = []
+    for idx in np.ndindex(*shape):
+        params.append([grid[i][idx[i]] for i in range(len(idx))])
+    for idx, l in zip(np.ndindex(*shape), loss(np.array(params))):
+        ll_grid[idx] = l
+    min_idxs = np.unravel_index(np.argmin(ll_grid, axis=None), ll_grid.shape)
+    delta = grid[0][1] - grid[0][0]
 
-    for i, x in enumerate(x_grid):
-        ll_grid[i, :] = loss(np.array([[x, y] for y in y_grid]))
+    fine_grid = [np.linspace(grid[i][min_idxs[i]] - delta, grid[i][min_idxs[i]] + delta, grid_length) for i in range(n_params)]
+
+    params_fine = []
+    for idx in np.ndindex(*shape):
+        params_fine.append([fine_grid[i][idx[i]] for i in range(len(idx))])
+    
+    for idx, l in zip(np.ndindex(*shape), loss(np.array(params_fine))):
+        ll_grid[idx] = l
 
     min_idxs = np.unravel_index(np.argmin(ll_grid, axis=None), ll_grid.shape)
-    delta = x_grid[1] - x_grid[0]
-
-    fine_x_grid = np.linspace(
-        x_grid[min_idxs[0]] - delta, x_grid[min_idxs[0]] + delta, grid_length
-    )
-
-    fine_y_grid = np.linspace(
-        y_grid[min_idxs[1]] - delta,
-        y_grid[min_idxs[1]] + delta,
-        grid_length,
-    )
-
-    for i, x in enumerate(fine_x_grid):
-        ll_grid[i, :] = loss(np.array([[x, y] for y in fine_y_grid]))
-
-    min_idxs = np.unravel_index(np.argmin(ll_grid, axis=None), ll_grid.shape)
-    beta = np.array([fine_x_grid[min_idxs[0]], fine_y_grid[min_idxs[1]]])
+    beta = np.array([fine_grid[i][min_idxs[i]] for i in range(len(min_idxs))])
     return beta
 
 
@@ -275,10 +274,11 @@ def grid_fit_shrink_beta(
     ndarray
         Fitted MAP LFC parameter.
     """
-    x_grid = np.linspace(min_beta, max_beta, grid_length)
-    y_grid = np.linspace(min_beta, max_beta, grid_length)
-    ll_grid = np.zeros((grid_length, grid_length))
-
+    n_params = design_matrix.shape[1]
+    grid = [np.linspace(min_beta, max_beta, grid_length) for _ in range(n_params)]
+    shape = [grid_length for n in range(n_params)]
+    ll_grid = np.zeros(shape)
+    
     def loss(beta: np.ndarray) -> float:
         # closure to minimize
         return (
@@ -294,27 +294,17 @@ def grid_fit_shrink_beta(
             / scale_cnst
         )
 
-    for i, x in enumerate(x_grid):
-        for j, y in enumerate(y_grid):
-            ll_grid[i, j] = loss(np.array([x, y]))
+    for idx in np.ndindex(*shape):
+        ll_grid[idx] = loss(np.array([grid[i][idx[i]] for i in range(len(idx))]))
 
     min_idxs = np.unravel_index(np.argmin(ll_grid, axis=None), ll_grid.shape)
-    delta = x_grid[1] - x_grid[0]
+    delta = grid[0][1] - grid[0][0]
 
-    fine_x_grid = np.linspace(
-        x_grid[min_idxs[0]] - delta, x_grid[min_idxs[0]] + delta, grid_length
-    )
+    fine_grid = [np.linspace(grid[i][min_idxs[i]] - delta, grid[i][min_idxs[i]] + delta, grid_length) for i in range(n_params)]
 
-    fine_y_grid = np.linspace(
-        y_grid[min_idxs[1]] - delta,
-        y_grid[min_idxs[1]] + delta,
-        grid_length,
-    )
-
-    for i, x in enumerate(fine_x_grid):
-        for j, y in enumerate(fine_y_grid):
-            ll_grid[i, j] = loss(np.array([x, y]))
+    for idx in np.ndindex(*shape):
+        ll_grid[idx] = loss(np.array([fine_grid[i][idx[i]] for i in range(len(idx))]))
 
     min_idxs = np.unravel_index(np.argmin(ll_grid, axis=None), ll_grid.shape)
-    beta = np.array([fine_x_grid[min_idxs[0]], fine_y_grid[min_idxs[1]]])
+    beta = np.array([fine_grid[i][min_idxs[i]] for i in range(len(min_idxs))])
     return beta
