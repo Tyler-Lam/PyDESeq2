@@ -197,7 +197,7 @@ class DeseqStats:
                     "No default contrast provided, "
                     "defaulting to likelihood ratio test (lrt)", 
                     UserWarning, 
-                    stack_level = 2
+                    stacklevel = 2
                 )
         elif isinstance(contrast, np.ndarray):
             if contrast.shape[0] != self.dds.obsm["design_matrix"].shape[1]:
