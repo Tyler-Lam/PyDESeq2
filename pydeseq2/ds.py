@@ -390,21 +390,33 @@ class DeseqStats:
         else:
             ridge_factor = np.diag(np.repeat(1e-6, num_vars))
             
+        counts = self.dds.X.copy()
         design_matrix = self.design_matrix.values
         LFCs = self.LFC.values
         size_factors = self.dds.obs['size_factors'].values
+        disp = self.dds.var['dispersions'].values
+        
         reduced_design_matrix = FormulaicContrasts(self.dds.obs, self.design_null if self.design_null is not None else "~1").design_matrix.values
         reduced_ridge_factor = np.diag(np.repeat(1e-6, reduced_design_matrix.shape[1]))
         
         if not self.quiet:
             print("Running LLR tests...", file = sys.stderr)
             
+        # Update the counts if the dds with fit with cooks outlier replacement
+        # Dispersions and log fold changes should already be updated in the main dds
+        if self.dds.refit_cooks:
+            if self.dds.var['refitted'].any(axis = 0):
+                refit_counts = self.dds.counts_to_refit
+                refit_idx = self.dds.var_names.get_indexer(refit_counts.var_names)
+            
+                counts[:, refit_idx] = refit_counts.X
+
         start = time.time()
         pvals, stats = self.inference.lrt_test(
-            counts = self.dds.X,
+            counts = counts,
             design_matrix = design_matrix,
             size_factors = size_factors,
-            disp = self.dds.var['dispersions'].values,
+            disp = disp,
             lfc = LFCs,
             min_mu = self.dds.min_mu,
             ridge_factor = ridge_factor,

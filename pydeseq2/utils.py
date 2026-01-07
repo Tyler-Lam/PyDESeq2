@@ -14,6 +14,7 @@ from scipy.special import gammaln  # type: ignore
 from scipy.special import polygamma  # type: ignore
 from scipy.stats import norm  # type: ignore
 from scipy.stats import chi2 # type: ignore
+from scipy.stats import f
 from sklearn.linear_model import LinearRegression  # type: ignore
 
 import pydeseq2
@@ -719,6 +720,54 @@ def fit_lin_mu(
     return np.maximum(mu_hat, min_mu)
 
 
+def robust_method_of_moments_disp(
+    normed_counts: np.ndarray, design_matrix: pd.DataFrame
+) -> np.ndarray:
+    """Perform dispersion estimation using a method of trimmed moments.
+
+    Used for outlier detection based on Cook's distance.
+
+    Parameters
+    ----------
+    normed_counts : ndarray
+        Array of deseq2-normalized read counts. Rows: samples, columns: genes.
+
+    design_matrix : pandas.DataFrame
+        A DataFrame with experiment design information (to split cohorts).
+        Indexed by sample barcodes. Unexpanded, *with* intercept.
+
+    Returns
+    -------
+    ndarray
+        Trimmed method of moment dispersion estimates.
+        Used for outlier detection based on Cook's distance.
+    """
+    # if there are 3 or more replicates in any cell
+    three_or_more = n_or_more_replicates(design_matrix, 3)
+    if three_or_more.any():
+        # 1 - group rows by unique combinations of design factors
+        # 2 - keep only groups with 3 or more replicates
+        # 3 - filter the counts matrix to only keep rows in those groups
+        filtered_counts = normed_counts[three_or_more.to_numpy(), :]
+        filtered_design = design_matrix.loc[three_or_more, :]
+        cell_id = pd.Series(
+            filtered_design.groupby(filtered_design.columns.values.tolist()).ngroup(),
+            index=filtered_design.index,
+        )
+        v = trimmed_cell_variance(filtered_counts, cell_id)
+    else:
+        v = cast(
+            np.ndarray, trimmed_variance(normed_counts)
+        )  # Since normed_counts is always 2D, trimmed_variance returns ndarray
+
+    m = normed_counts.mean(0)
+    alpha = (v - m) / m**2
+    # cannot use the typical min_disp = 1e-8 here or else all counts in the same
+    # group as the outlier count will get an extreme Cook's distance
+    minDisp = 0.04
+    np.maximum(alpha, minDisp, out=alpha)
+    return alpha
+
 def wald_test(
     design_matrix: np.ndarray,
     disp: float,
@@ -863,7 +912,7 @@ def lrt_test(
         LRT statistic.
     """
     
-    def reg_nb_nll(
+    def reg_nb_ll(
         beta: np.ndarray, design_matrix: np.ndarray, ridge_factor: np.ndarray
     ) -> float:
         # closure to minimize
@@ -871,7 +920,7 @@ def lrt_test(
         val = nb_nll(counts, mu_, disp) + 0.5 * (ridge_factor @ beta**2).sum()
         return -1.0 * val  # maximize the likelihood
     
-    beta_reduced, *_ = irls_solver(
+    beta_reduced, mu_, hat_diagonals_, converged_ = irls_solver(
         counts=counts,
         size_factors=size_factors,
         design_matrix=reduced_design_matrix,
@@ -879,9 +928,9 @@ def lrt_test(
         min_mu=min_mu,
         beta_tol=beta_tol,
     )
-
-    reduced_ll = reg_nb_nll(beta_reduced, reduced_design_matrix, reduced_ridge_factor)
-    full_ll = reg_nb_nll(lfc, design_matrix, ridge_factor)
+        
+    reduced_ll = reg_nb_ll(beta_reduced, reduced_design_matrix, reduced_ridge_factor)
+    full_ll = reg_nb_ll(lfc, design_matrix, ridge_factor)
 
     lrt_statistic = 2 * (full_ll - reduced_ll)
     lrt_p_value = chi2.sf(lrt_statistic, df=design_matrix.shape[1] - reduced_design_matrix.shape[1])
@@ -987,54 +1036,6 @@ def n_or_more_replicates(design_matrix: pd.DataFrame, min_replicates: int) -> pd
     replaceable.index = design_matrix.index
     return replaceable
 
-
-def robust_method_of_moments_disp(
-    normed_counts: np.ndarray, design_matrix: pd.DataFrame
-) -> np.ndarray:
-    """Perform dispersion estimation using a method of trimmed moments.
-
-    Used for outlier detection based on Cook's distance.
-
-    Parameters
-    ----------
-    normed_counts : ndarray
-        Array of deseq2-normalized read counts. Rows: samples, columns: genes.
-
-    design_matrix : pandas.DataFrame
-        A DataFrame with experiment design information (to split cohorts).
-        Indexed by sample barcodes. Unexpanded, *with* intercept.
-
-    Returns
-    -------
-    ndarray
-        Trimmed method of moment dispersion estimates.
-        Used for outlier detection based on Cook's distance.
-    """
-    # if there are 3 or more replicates in any cell
-    three_or_more = n_or_more_replicates(design_matrix, 3)
-    if three_or_more.any():
-        # 1 - group rows by unique combinations of design factors
-        # 2 - keep only groups with 3 or more replicates
-        # 3 - filter the counts matrix to only keep rows in those groups
-        filtered_counts = normed_counts[three_or_more.to_numpy(), :]
-        filtered_design = design_matrix.loc[three_or_more, :]
-        cell_id = pd.Series(
-            filtered_design.groupby(filtered_design.columns.values.tolist()).ngroup(),
-            index=filtered_design.index,
-        )
-        v = trimmed_cell_variance(filtered_counts, cell_id)
-    else:
-        v = cast(
-            np.ndarray, trimmed_variance(normed_counts)
-        )  # Since normed_counts is always 2D, trimmed_variance returns ndarray
-
-    m = normed_counts.mean(0)
-    alpha = (v - m) / m**2
-    # cannot use the typical min_disp = 1e-8 here or else all counts in the same
-    # group as the outlier count will get an extreme Cook's distance
-    minDisp = 0.04
-    np.maximum(alpha, minDisp, out=alpha)
-    return alpha
 
 
 def get_num_processes(n_cpus: int | None) -> int:

@@ -1440,6 +1440,8 @@ class DeseqDataSet(ad.AnnData):
         # Estimate log-fold changes (in natural log scale)
         sub_dds.fit_LFC()
 
+        self.counts_to_refit = sub_dds.copy()
+        
         # Replace values in main object
         self.var.loc[self.var["refitted"], "_normed_means"] = sub_dds.var[
             "_normed_means"
