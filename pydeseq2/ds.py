@@ -147,7 +147,7 @@ class DeseqStats:
     def __init__(
         self,
         dds: DeseqDataSet,
-        contrast: list[str] | np.ndarray | None = None,
+        contrast: list[str] | np.ndarray | dict | None = None,
         alpha: float = 0.05,
         cooks_filter: bool = True,
         independent_filter: bool = True,
