@@ -861,7 +861,7 @@ def wald_test(
         wald_statistic = float(contrast @ (lfc - lfc_null) / wald_se)
         wald_p_value = 2 * norm.sf(np.abs(wald_statistic))
 
-    return wald_p_value, wald_statistic, wald_se
+    return wald_p_value, wald_statistic**2, wald_se
 
 # LLR test copied from https://github.com/owkin/PyDESeq2/pull/178/files#
 def lrt_test(
